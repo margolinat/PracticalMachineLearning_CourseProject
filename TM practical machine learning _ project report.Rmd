@@ -1,0 +1,349 @@
+# Predicting quality of an exercise execution from accelerometer data
+### Practical Machine Learning: Course Project Report
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# upload libraries
+library(caret)
+library(corrplot)
+library(rpart)
+library(pROC)
+library(grid)
+library(randomForest)
+# Define execution and uploading switches:
+EXEcution.switch <- 1
+# 0 - do not re-calculate the predictors; use previously stored results
+# 1 - re-calculate the predictors; the previously stored results will be re-written
+UPLoading.switch <- 1
+# 0 - upload from the working directory
+# 1 - upload from website
+```
+
+### Summary
+A machine-learning based classifier has been built to predict quality of the Unilateral Dumbbell Bicepts Curl execution from measurements collected with on-body sensing accelerometers. The training data for the project was provided by Coursera and have been created from an openly available Weight Lifting Exercising Dataset. The constructed model is a Random Forest classifier and has an expected out-of-the-sample accuracy of 0.998, which is comparable with suggested baseline accuracy. The prediction made by the model for the testing data yielded 20 out of 20 correct results.
+
+### Background
+
+**Data.** 
+The [dataset for the present research](https://class.coursera.org/predmachlearn-015/human_grading/view/courses/973550/assessments/4/submissions) was provided by Prof. Peng. The data came from the Weight Lifting exercise Dataset <http://groupware.les.inf.puc-rio.br/har>, which is licensed under the Creative Commons license (CC BY-SA) and has been collected and kindly made available to researchers by [Ugulino et. al., 2012](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf). Read more [here](http://groupware.les.inf.puc-rio.br/har#ixzz3dX48xS6Y).
+
+**The research objectives.**
+The goals of this project were to (1) construct a machine-learning based model to predict quality of the exercise execution from on-body sensing accelerometers, (2) estimate its expected out-of-the-sample accuracy, and (3) apply it to a "blind" testing data for submission.  
+
+
+**Terminology.**
+
+* *Raw dataset.* The dataset provided by Coursera as the "training data for the project".   
+* *Cleaned dataset.* The raw dataset after it has been cleaned by removing variables with the majority of missing information. The cleaned dataset contains complete cases only.
+* *Training subset.* A subset (60%) of the cleaned dataset used to train different predictors.  
+* *Testing subset.* A subset (20%) of the cleaned dataset used to compare accuracy of predictors.
+* *Validation subset.* A subset (20%) of the cleaned dataset used to calculate out-of-the-sample accuracy of the best predictive model.
+* *Submission dataset.* The dataset provided by Coursera as the "test data"
+
+
+**Methodology.** 
+
+1. Preliminary analysis of the *raw dataset* for missing and erroneous values; removing uninformative variables, as well as variables, which can result in biased classifiers.
+2. Splitting the *cleaned dataset* into *training subset*, *testing subset* and *validation subset*.
+3. Exploratory analysis of the *training subset*: outliers, correlations, clustering. Preliminary conclusions about potential suitability of different classifiers.
+4. Training several models using the *training subset*.
+5. Tuning the models and estimating their accuracy using the *testing subset*. At this step the model cross-validation is done, and the best model is chosen.
+6. Estimating the out-of-sample accuracy of the chosen predictive model using the *validation subset*.
+7. Predicting outcomes using the *submission dataset*.
+
+#### 1. Preliminary analysis and preprocessing of the *raw dataset* 
+```{r, echo=FALSE}
+# upload the data
+if (UPLoading.switch == 0) 
+  {raw.data <- read.csv("pml-training.csv", na.strings=c("", "NA", "#DIV/0!"))
+   }
+if (UPLoading.switch == 1)
+  {raw.data <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", na.strings=c("", "NA", "#DIV/0!"))
+   }
+```
+
+The *raw dataset* has been uploaded into the Rstudio workspace as a data frame, containing `r nrow(raw.data)` cases and `r ncol(raw.data)` variables: 
+one explanatory variable "classe" with five levels ("A", "B", "C", "D", "E"),
+seven bookkeeping variables (name of a user, timestamps etc.), and 152 variables, which can potentially be used as explanatory variables. During the data upload all the missing values (empty cells in the original csv file), NaNs and erroneous entries ("#DIV/0!") were treated as NaNs to facilitate data pre-processing.
+
+The bookkeeping variables will introduce a considerable bias into predictive models, inflating the in-sample accuracy and making the out-of-sample accuracy estimated via cross-validation unrepresentative and unrealistically high. To avoid these unwelcome consequences, these variables have been excluded from the further analysis. The "user-name" variable has been saved in a separate file to confirm later that all the users are represented proportionally in the dataset to be used for the model construction. Note that the "user-name" variable has NOT be used as predictor in any models constructed in this project.
+```{r, echo = FALSE}
+## step 1: remove "unmeaningful" columns: time, sequential numbers, users etc
+data.step.1 <- subset(raw.data, select = roll_belt:classe)
+data.user_name <- raw.data$user_name # will save it to check for random sampling
+```
+
+At the next step the data.frame was analyzed for missing values. 100 variables were found to have at least 19216 (about 97% of total cases) missing or erroneous values, and have been removed from the further analysis. The excluded variables represent characteristics derived from direct measurements: minimum, maximum, mean, skewness, kurtosis, standard deviation and variance, as well as amplitudes. These statistics are only representative of this particular dataset, e.g. for a specific user, and would make the constructed models useless for other data.  
+
+The *cleaned dataset* contains 19622 complete cases with the "classe" response variable and 52 explanatory variables. Its internal structure is shown in **Appendix 1**.
+```{r, echo = FALSE}
+## step 2: remove columns with majority of NaNs
+ISNA <- apply(is.na(data.step.1), 2, sum) # number of NaNs in each column
+data.step.2 <- data.step.1[,ISNA == 0] # remove columns with NaNs
+```
+
+#### 2. Partitioning for training, testing and validation
+The rest of the analysis and model construction has been perfomed with the [caret](http://topepo.github.io/caret/index.html) package. 
+
+The *cleaned dataset* has been partitioned into three subsets: a 60% one to train the predictors (*training subset*), a 20% to test the predictors (*testing subset*) and a 20% one to validate the best model and to estimate the expected out-of-the-sample accuracy (*validation subset*). 
+
+```{r, echo = FALSE}
+## partition into training and testing sets for cross-validation
+set.seed(1965)
+inTrain_1 <- createDataPartition(y = data.step.2$classe, p = 0.8, list = FALSE)
+data.training = data.step.2[inTrain_1,]
+data.validation  = data.step.2[-inTrain_1,]
+user_name.training = data.user_name[inTrain_1]
+set.seed(257)
+inTrain_2 <- createDataPartition(y = data.training$classe, p = 0.75, list = FALSE)
+data.training = data.training[inTrain_2,]
+data.testing  = data.training[-inTrain_2,]
+user_name.training = user_name.training[inTrain_2]
+
+## data for submission - DON'T NEED IT FOR THE REPORT
+submit.data <- read.csv("pml-testing.csv", na.strings=c("", "NA", "#DIV/0!"))
+submit.data <- subset(submit.data, select = roll_belt:problem_id)
+submit.data <- submit.data[,ISNA == 0] # remove columns with NaNs
+
+# to make sure there is no bias of choosing one user
+# table(user_name.training)/table(data.user_name) 
+```
+#### 3. Exploratory analysis of the *training subset*
+After checking that the *training subset* is not biased toward any specific user(s), it was analyzed for outliers and correlations among variables.
+One offensive outlier has been detected, which correspons to line #5374 in the csv-file (for example, the "gyros_dumbbell z" variable for that case is larger than 300 while for all other cases it is considerably less than 1). It was determined later that keeping or removing this outlier from the *training subset* does not influence skills of a constructed predictor. However it significantly pulls variable correlations up, and thus has been removed from the correlation analysis.  
+```{r, echo = FALSE}
+# check columns 31 and up for reasons!
+# also - check how this removed measurement
+# pulls correlations up!
+Iremove <- which(data.training$gyros_dumbbell_z > 300)
+data.training <- data.training[-Iremove,]
+user_name.training <- user_name.training[-Iremove]
+```
+
+The correlation matrix is plotted below using the corr R package.
+
+#### Figure 1. Correlation matrix for the explanatory variables
+```{r, echo = FALSE}
+## now I will look for highly correlated parameters
+CP <- (cor(data.training[,-53]))
+corrplot(CP, method = "square", tl.cex = 0.5, tl.srt = 45, tl.col = "black")
+# impose thresholds
+diag(CP) <- 0
+CP[abs(CP)<0.9] <- 0
+```
+
+Eight pairs of variables have been found to have correlation coefficients higher than 0.9. See **Appendix 2** for the complete list.
+```{r, echo = FALSE}
+IJK <- which(CP != 0, arr.ind = T)
+#unique(names(data.training)[IJK])
+```
+
+Two variable pairs with high correlation coefficients are plotted below as an example.
+
+#### Figure 2. Examples of highly-correlated variables
+```{r, echo = FALSE}
+# the plotting below uses follows the strategy from
+# http://www.r-bloggers.com/setting-plots-side-by-side/
+# to meet the assignment requirements, only two pairs are plotted 
+#p1 = qplot(data.training[,IJK[1,1]], data.training[,IJK[1,2]],
+#           main = "(c)",
+#           xlab = names(data.training)[IJK[1,1]], 
+#           ylab = names(data.training[IJK[1,2]]))
+p2= qplot(data.training[,IJK[3,1]], data.training[,IJK[3,2]],
+           main = "(a) Example 1, cor = -0.992",
+           xlab = names(data.training)[IJK[3,1]], 
+           ylab = names(data.training[IJK[3,2]]))
+#p3 = qplot(data.training[,IJK[4,1]], data.training[,IJK[4,2]],
+#           main = "(d)",
+#           xlab = names(data.training)[IJK[4,1]], 
+#           ylab = names(data.training[IJK[4,2]]))
+p4= qplot(data.training[,IJK[16,1]], data.training[,IJK[16,2]],
+           main = "(b) Example 2, cor = -0.918",
+           xlab = names(data.training)[IJK[16,1]], 
+           ylab = names(data.training[IJK[16,2]]))
+
+pushViewport(viewport(layout = grid.layout(1, 2)))
+#print(p1, vp = viewport(layout.pos.row = 1, layout.pos.col = 2))
+print(p2, vp = viewport(layout.pos.row = 1, layout.pos.col = 1))
+#print(p3, vp = viewport(layout.pos.row = 2, layout.pos.col = 2))
+print(p4, vp = viewport(layout.pos.row = 1, layout.pos.col = 2))
+
+
+
+```
+
+A closer look into the highly-correlated explanatory variables revealed significant clustering of these variables (excluding one pair shown in Fig. 2b). Stratifying the data by variable "roll_belt" (one of the highly correlated variables) resulted in lowered correlation coefficients of corresponding pairs of variables. Two preliminary conclusions can be made based on this result. First, using a linear regression prediction may not be beneficial for these data. Second, a Random Forest Classifier is expected to be the most efficient predictor. Besides, pre-processing the data with PCA may provide some benefit. But this benefit may not be worth loosing some data variability.
+
+As seen from Figure 3, the explanatory data variables have different ranges of variation, and may benefit from scaling and centering. Note that the y-axis limit of the plot has been adjusted for a zoomed view.
+
+#### Figure 3. Boxplot of explanatory variables
+```{r, echo = FALSE}
+# idea from http://stackoverflow.com/questions/18670795/r-boxplot-tilted-labels-x-axis
+boxplot(data.training[,-53], xaxt = "n",  xlab = "", ylim = range(-1200:1200))
+labels <- names(data.training[,-53])
+axis(1, labels = FALSE)
+text(x =  seq_along(labels), y = par("usr")[3] - 1, srt = 45, adj = 1,
+     labels = labels, xpd = TRUE, cex = 0.5)
+```
+
+#### 4. Building machine-learning-based predictors
+The *training dataset* described above was used to build the following predictive models: regression partitioning with trees (rpart), Random Forest classifier (RF), Linear Discriminant Analysis (LDA), Naïve Bayesian (NB), boosting (GBM).
+Using the above preliminary conclusions, different training options have been applied: removing/keeping the outlier, scaling/centering, cross-validation resampling, PCA pre-processing.
+
+```{r, echo = FALSE}
+if (EXEcution.switch == 1)
+  {## partitioning into trees
+  modelFit_rpart       <- train(data.training$classe ~ ., 
+                                method = "rpart", 
+                                data = data.training)  
+  plot(modelFit_rpart$finalModel, uniform = TRUE, main = "Classification Tree")
+  text(modelFit_rpart$finalModel, use.n = TRUE, all = TRUE, cex = .8)
+  modelFit_rpart_cv    <- train(data.training$classe ~ ., 
+                                method = "rpart", 
+                                data = data.training,
+                                trControl = trainControl(method = "cv"))
+  modelFit_rpart_scale <- train(data.training$classe ~ ., 
+                                method = "rpart", 
+                                data = data.training,
+                                preProcess = c("center","scale"),
+                                trControl = trainControl(method = "cv"))
+  modelFit_rpart_pca   <- train(data.training$classe ~ ., 
+                                method = "rpart", 
+                                data = data.training,
+                                preProcess = c("pca"),
+                                trControl = trainControl(method = "cv"))
+  modelFit_rpart_rf   <-  train(data.training.train$classe ~ ., 
+                                method = "rf", 
+                                data = data.training,
+                                preProcess = c("center","scale"),
+                                trControl = trainControl(method = "cv"),
+                                prox = TRUE)
+  modelFit_rpart_rf_out <-  train(data.training$classe ~ ., 
+                                method = "rf", 
+                                data = data.training,
+                                preProcess = c("center","scale"),
+                                trControl = trainControl(method = "cv"),
+                                prox = TRUE)
+  modelFit_lda <-  train(data.training$classe ~ ., 
+                                  method = "lda", 
+                                  data = data.training,
+                                  trControl = trainControl(method = "cv"))
+  modelFit_nb <-  train(data.training$classe ~ ., 
+                         method = "nb", 
+                         data = data.training,
+                         trControl = trainControl(method = "cv"))
+  modelFit_gbm <-  train(data.training$classe ~ ., 
+                        method = "gbm", 
+                      data = data.training,
+                        trControl = trainControl(method = "cv"),
+                        verbose = FALSE)
+  save(modelFit_lda, modelFit_nb, modelFit_rpart_rf, modelFit_gbm, modelFit_rpart_cv,
+       file = "myMLmodels.RData")
+  }
+if (EXEcution.switch == 0)
+  {load("myMLmodels.Rdata")}
+```
+The model calculation takes considerable computing time. The results have been saved as "myMLmodels.RData" file to be retrived for performance assessment.
+
+#### 5. Choosing the best classifier
+In-sample accuracies of the classifiers with different training options have been compared. It was found out that applying the pca pre-processing is not recommended for these data: the accuracy was lower than a random prediction and did not exceed 0.4. Removing the outlier did not effect the prediction accuracy. The in-sample accuracy for selected models are shown below: 
+```{r, echo = FALSE}
+print(getTrainPerf(modelFit_rpart_cv))
+print(getTrainPerf(modelFit_rpart_rf))
+print(getTrainPerf(modelFit_nb))
+print(getTrainPerf(modelFit_lda))
+print(getTrainPerf(modelFit_gbm))
+```
+Based on these results, the Random Forest classifier has been chosen for further analysis. 
+
+#### 6. Validation of the best model: estimating of out-of-the-sample accuracy 
+
+The *validation subset* was used to estimate the out-of-the-sample accuracy of the RF classifier. 
+```{r, echo = FALSE}
+CM <- confusionMatrix(data.validation$classe,
+                      predict(modelFit_rpart_rf, data.validation))
+```
+It is estimated that the expected "out-of-the-sample" accuracy of the constructed model is 0.9982 with [0.9963 0.9993] 95% confidence interval. That high "out-of-sample" accuracy implies that the chosen model does not overfit the training data.
+
+The full confusion matrix and variables ranged by importance are shown in **Appendices 3** and **4** respectively.
+
+#### 7. Predicting for submission
+Since the chosen predictor is expected to have high out-of-the-sample accuracy comparable to the suggested baseline accuracy of 0.994 given in the [original dataset description](http://groupware.les.inf.puc-rio.br/har#ixzz3dX48xS6Y), The trained Random Forest model was used to predict outcomes for the *submission dataset*.
+```{r, echo = FALSE}
+SUBMIT <- predict(modelFit_rpart_rf, submit.data)
+print(SUBMIT)
+```
+The prediction made by the trained Random Forest classifier yielded 20 out of 20 correct results.
+
+
+#### Acknowledgements
+Many thanks to all participants of the Discussion Forum, and especially to the Community TA Patricia Ellen Tressel, whose help has been invaluable!
+
+The following R packages were used in the project:
+
+* [caret](http://CRAN.R-project.org/package=caret)
+* [randomForest](http://CRAN.R-project.org/doc/Rnews/)
+* [lda](http://CRAN.R-project.org/package=lda)
+* [NB](http://CRAN.R-project.org/package=NB)
+* [rPart](http://CRAN.R-project.org/package=rpart)
+* [pROC](http://CRAN.R-project.org/package=rpart)
+* [ggplot2](http://had.co.nz/ggplot2/book)
+* [corrplot](http://CRAN.R-project.org/package=corrplot)
+
+#### References
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H., 2012: Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6. 
+
+Max Kuhn. Contributions from Jed Wing, Steve Weston, Andre Williams, Chris Keefer,
+  Allan Engelhardt, Tony Cooper, Zachary Mayer, Brenton Kenkel, the R Core Team,
+  Michael Benesty, Reynald Lescarbeau, Andrew Ziem and Luca Scrucca, 2015: caret:
+  Classification and Regression Training. R package version 6.0-47.
+  http://CRAN.R-project.org/package=caret
+  
+Taiyun Wei, 2013: corrplot: Visualization of a correlation matrix. R package
+version 0.73. http://CRAN.R-project.org/package=corrplot
+
+Terry Therneau, Beth Atkinson and Brian Ripley, 2014: rpart: Recursive
+  Partitioning and Regression Trees. R package version 4.1-8.
+  http://CRAN.R-project.org/package=rpart
+  
+Liaw A. and M. Wiener, 2002: Classification and Regression by randomForest. R News
+  2(3), 18--22.
+  
+Xavier Robin, Natacha Turck, Alexandre Hainard, Natalia Tiberti, Frédérique
+  Lisacek, Jean-Charles Sanchez and Markus Müller, 2011: pROC: an open-source
+  package for R and S+ to analyze and compare ROC curves. BMC Bioinformatics,
+  12, p. 77.  DOI: 10.1186/1471-2105-12-77. http://www.biomedcentral.com/1471-2105/12/77/  
+
+Wickham H., 2009: ggplot2: elegant graphics for data analysis. Springer New York
+
+Chang J., 2012: lda: Collapsed Gibbs sampling methods for topic models.. R
+  package version 1.3.2. http://CRAN.R-project.org/package=lda
+  
+#### Appendices
+To avoid cluttering, some R outputs, which can be of potential interest to a reader, are presented here.
+
+##### Appendix 1. Summary of the cleaned dataset
+```{r, echo = FALSE}
+str(data.step.2)
+```
+
+##### Appendix 2. Pairs of variables with correlation coefficients larger than 0.9
+```{r, echo = FALSE}
+print(IJK)
+```
+
+##### Appendix 3. Confusion Matrix for the Random Forest classifier
+```{r, echo = FALSE}
+print(CM)
+```
+
+##### Appendix 4. Variable Importance for the Random Forest classifier
+```{r, echo = FALSE}
+print(CM)
+```
+---
+============
+
+author: "TM"
+date: "Friday, June 19, 2015"
+output: html_document
+---
